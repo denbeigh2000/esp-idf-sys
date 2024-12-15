@@ -277,7 +277,16 @@ pub fn build() -> Result<EspIdfBuildOutput> {
         None
     };
 
-    if let SourceTree::Git(repository) = &idf.esp_idf_dir {
+    if idf.is_managed_espidf {
+        let repository = match idf.esp_idf_dir {
+            SourceTree::Git(ref r) => r,
+            _ => {
+                return Err(anyhow!(
+                    "Expected managed repository to always be a git repository"
+                ))
+            }
+        };
+
         let patch_set = match idf.version.as_ref().map(|v| (v.major, v.minor, v.patch)) {
             // master branch
             _ if {
