@@ -11,7 +11,8 @@ use embuild::cargo::IntoWarning;
 use embuild::cmake::file_api::codemodel::Language;
 use embuild::cmake::file_api::ObjKind;
 use embuild::espidf::{
-    EspIdfOrigin, EspIdfRemote, FromEnvError, SourceTree, DEFAULT_ESP_IDF_REPOSITORY,
+    EspIdfOrigin, EspIdfRemote, FromEnvError, NotActivatedError, SourceTree,
+    DEFAULT_ESP_IDF_REPOSITORY,
 };
 use embuild::fs::copy_file_if_different;
 use embuild::utils::{OsStrExt, PathExt};
@@ -169,49 +170,49 @@ pub fn build() -> Result<EspIdfBuildOutput> {
             Ok((idf, idf_tools_install_dir.clone()))
         };
 
-        let idf_path = config.native.idf_path.as_deref();
-
         // 1. Try to use the activated esp-idf environment if `esp_idf_tools_install_dir`
         //    is `fromenv` or unset.
         // 2. Use a custom esp-idf repository specified by `$IDF_PATH`/`idf_path` if
         //    available and install the tools using `embuild::espidf::Installer` in
         //    `install_dir`.
         // 3. Install the esp-idf and its tools in `install_dir`.
-        match (espidf::EspIdf::try_from_env(idf_path), maybe_from_env) {
-            (Ok(idf), true) => {
-                eprintln!(
-                    "Using activated esp-idf {} environment at '{}'",
-                    espidf::EspIdfVersion::format(&idf.version),
-                    idf.esp_idf_dir.path().display()
-                );
+        if let Some(idf_path) = config.native.idf_path.as_deref() {
+            let idf = espidf::EspIdf::try_from(idf_path)?;
+            // We were provided a custom IDF path, ensure we can use it.
+            eprintln!(
+                "Using activated esp-idf {} environment at '{}'",
+                espidf::EspIdfVersion::format(&idf.version),
+                idf.esp_idf_dir.path().display()
+            );
 
-                (idf, InstallDir::FromEnv)
-            },
-            (Ok(idf), false) => {
+            if !require_from_env && !is_default_install_dir {
+                // TODO(denbeigh, before merge): ensure we haven't changed this
+                // combinatorial logic
                 cargo::print_warning(format_args!(
-                    "Ignoring activated esp-idf environment: {ESP_IDF_TOOLS_INSTALL_DIR_VAR} != {}", InstallDir::FromEnv
+                    "Ignoring activated esp-idf environment: {ESP_IDF_TOOLS_INSTALL_DIR_VAR} != {}",
+                    InstallDir::FromEnv
                 ));
                 install(EspIdfOrigin::Custom(idf.esp_idf_dir))?
-            },
-            (Err(FromEnvError::NotActivated { source: err, .. }), true) |
-            (Err(FromEnvError::NoRepo(err)), true) if require_from_env => {
-                return Err(err.context(
-                    format!("activated esp-idf environment not found but required by {ESP_IDF_TOOLS_INSTALL_DIR_VAR} == {idf_tools_install_dir}")
-                ))
+            } else {
+                (idf, InstallDir::FromEnv)
             }
-            (Err(FromEnvError::NotActivated { esp_idf_dir, .. }), _) => {
-                install(EspIdfOrigin::Custom(esp_idf_dir))?
-            },
-            (Err(FromEnvError::NoRepo(_)), _) => {
-                let origin = match idf_path {
-                    Some(idf_path) => EspIdfOrigin::Custom(SourceTree::Plain(idf_path.to_path_buf())),
-                    None => EspIdfOrigin::Managed(EspIdfRemote {
-                        git_ref: config.native.esp_idf_version(),
-                        repo_url: config.native.esp_idf_repository.clone()
-                    })
-                };
-                install(origin)?
-            },
+        } else {
+            if require_from_env {
+                // We were not provided with an IDF path, but we explicitly
+                // required we use tools from the environment
+                return Err(anyhow!(
+                    "activated esp-idf environment not found but required by {ESP_IDF_TOOLS_INSTALL_DIR_VAR} == {idf_tools_install_dir}"
+                ));
+            }
+
+            // We were not provided with a custom IDF path, and we don't
+            // explicitly require one. Clone a remote repo, and install
+            // its tooling.
+            let origin = EspIdfOrigin::Managed(EspIdfRemote {
+                git_ref: config.native.esp_idf_version(),
+                repo_url: config.native.esp_idf_repository.clone(),
+            });
+            install(origin)?
         }
     };
 
